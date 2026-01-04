@@ -1,0 +1,426 @@
+!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Liquid Crystal Button</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@800&display=swap');
+        
+        body {
+            margin: 0 auto;
+            overflow: hidden;
+            background-color: #050505;
+            font-family: 'Inter', sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+
+        #canvas-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at center, #1a1a1a 0%, #000 100%);
+            cursor: default;
+            touch-action: none;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* The Submit Text */
+        #submit-text {
+            position: absolute;
+            display: block;
+            z-index: 10;
+            color: #ffffff;
+            font-size: 2rem;
+            letter-spacing: 0.2em;
+            font-weight: 800;
+            text-transform: uppercase;
+            pointer-events: none;
+            text-shadow: 
+                0 0 10px rgba(0,0,0,0.8),
+                0 0 20px rgba(0,0,0,0.6),
+                0 2px 5px rgba(0,0,0,1.0);
+            transition: transform 0.1s ease, letter-spacing 0.3s ease;
+        }
+
+        .status-ui {
+            position: absolute;
+            bottom: 40px;
+            width: 100%;
+            text-align: center;
+            z-index: 20;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background-color: #f00;
+            border-radius: 50%;
+            box-shadow: 0 0 10px #f00;
+            transition: background-color 0.3s, box-shadow 0.3s;
+        }
+
+        .status-text {
+            color: #444;
+            font-size: 0.7rem;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        .active .status-dot {
+            background-color: #0f0;
+            box-shadow: 0 0 10px #0f0;
+        }
+        .active .status-text { color: #666; }
+
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container">
+        <canvas id="glcanvas"></canvas>
+        <div id="submit-text">SUBMIT</div>
+        
+        <div class="status-ui" id="ui">
+            <div class="status-dot" id="dot"></div>
+            <div class="status-text" id="msg">Initialize Camera</div>
+        </div>
+    </div>
+
+    <!-- Vertex Shader -->
+    <script id="vertexShader" type="x-shader/x-vertex">
+        attribute vec2 position;
+        varying vec2 vUv;
+        void main() {
+            // Map -1..1 clip space to 0..1 UV space
+            vUv = position * 0.5 + 0.5;
+            gl_Position = vec4(position, 0.0, 1.0);
+        }
+    </script>
+
+    <!-- Fragment Shader -->
+    <script id="fragmentShader" type="x-shader/x-fragment">
+        #extension GL_OES_standard_derivatives : enable
+        precision highp float;
+
+        uniform float u_time;
+        uniform vec2 u_resolution;
+        uniform vec2 u_mouse;
+        uniform sampler2D u_texture;
+        uniform bool u_hasCamera;
+        
+        uniform float u_hover;
+        uniform float u_press;
+        uniform float u_lensDir;
+
+        varying vec2 vUv;
+
+        // --- SDF: Capsule Shape ---
+        float sdCapsule(vec2 p, vec2 size, float radius) {
+            vec2 d = abs(p) - size;
+            return min(max(d.x, d.y), 0.0) + length(max(d, 0.0)) - radius;
+        }
+
+        // --- Height Map: Smooth Lens ---
+        float getHeight(vec2 p) {
+            vec2 boxSize = vec2(0.3, 0.0);
+            float radius = 0.2;
+            
+            vec2 d = abs(p) - boxSize;
+            float dist = min(max(d.x, d.y), 0.0) + length(max(d, 0.0)) - radius;
+            
+            float h = smoothstep(0.0, -0.22, dist);
+            h = sin(h * 1.5707); 
+            // Multiply by lens direction to flip convexity
+            return h * u_lensDir;
+        }
+
+        void main() {
+            vec2 uv = vUv * 2.0 - 1.0;
+            uv.x *= u_resolution.x / u_resolution.y;
+
+            vec2 innerBox = vec2(0.3, 0.0);
+            float radius = 0.2;
+            
+            float scale = 1.0 - (u_press * 0.05);
+            uv /= scale;
+
+            float dist = sdCapsule(uv, innerBox, radius);
+            
+            float alpha = 1.0 - smoothstep(0.0, 0.002, dist);
+            if (alpha < 0.01) discard; 
+
+            // Normals
+            float eps = 0.002;
+            float h = getHeight(uv);
+            float hx = getHeight(uv + vec2(eps, 0.0));
+            float hy = getHeight(uv + vec2(0.0, eps));
+            
+            vec3 normal = normalize(vec3(h - hx, h - hy, 0.03)); 
+
+            // Refraction
+            vec3 viewDir = vec3(0.0, 0.0, -1.0); 
+            vec2 tilt = (u_mouse - 0.5) * 0.3 * (1.0 - u_press);
+            vec3 tiltedNormal = normalize(vec3(normal.xy + tilt, normal.z));
+            vec3 refracted = refract(viewDir, tiltedNormal, 0.55); 
+
+            // Texture
+            vec2 texUV = vUv + refracted.xy * 0.9; 
+            texUV.x = 1.0 - texUV.x; 
+
+            // Chromatic Aberration
+            vec3 col;
+            float aberration = 0.03 * (1.0 - normal.z); 
+            
+            if (u_hasCamera) {
+                float r = texture2D(u_texture, texUV + vec2(aberration, 0.0)).r;
+                float g = texture2D(u_texture, texUV).g;
+                float b = texture2D(u_texture, texUV - vec2(aberration, 0.0)).b;
+                col = vec3(r, g, b);
+            } else {
+                float n = sin(texUV.x * 8.0 + u_time) * cos(texUV.y * 8.0 - u_time);
+                col = vec3(0.5 + 0.5 * n);
+                col = pow(col, vec3(2.0)); 
+            }
+
+            // Aesthetics
+            float luma = dot(col, vec3(0.299, 0.587, 0.114));
+            
+            // Curve
+            float metal = smoothstep(0.15, 1.0, luma);
+            col = mix(vec3(metal), col, 0.55); 
+            
+            // Lighting
+            vec3 lightDir = normalize(vec3(-0.5, 0.8, 1.0));
+            vec3 reflectDir = reflect(viewDir, tiltedNormal);
+            float spec = pow(max(dot(reflectDir, lightDir), 0.0), 30.0);
+            float fresnel = pow(1.0 - tiltedNormal.z, 3.0);
+            float hoverGlow = u_hover * fresnel * 0.3;
+            
+            col += vec3(spec);          
+            col += vec3(fresnel) * 0.5;
+            col += vec3(hoverGlow);
+            col += vec3(u_press * 0.1);
+
+            gl_FragColor = vec4(col, alpha);
+        }
+    </script>
+
+    <script>
+        const canvas = document.getElementById('glcanvas');
+        const gl = canvas.getContext('webgl');
+        const ui = document.getElementById('ui');
+        const dot = document.getElementById('dot');
+        const msg = document.getElementById('msg');
+        const submitText = document.getElementById('submit-text');
+        const container = document.getElementById('canvas-container');
+
+        // Shader State
+        let program;
+        let texture;
+        let video;
+        let locations = {};
+        
+        // Interaction State
+        const state = {
+            time: 0,
+            width: 0,
+            height: 0,
+            mouseX: 0.5,
+            mouseY: 0.5,
+            hasCamera: false,
+            hover: 0,
+            press: 0,
+            lensDir: 1.0,
+            targetLensDir: 1.0,
+            isHovering: false,
+            isPressing: false
+        };
+
+        const BTN_HalfW = 0.5; 
+        const BTN_HalfH = 0.2;
+
+        function compileShader(src, type) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, src);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error(gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function initGL() {
+            // Compile Shaders
+            const vs = compileShader(document.getElementById('vertexShader').textContent, gl.VERTEX_SHADER);
+            const fs = compileShader(document.getElementById('fragmentShader').textContent, gl.FRAGMENT_SHADER);
+            
+            program = gl.createProgram();
+            gl.attachShader(program, vs);
+            gl.attachShader(program, fs);
+            gl.linkProgram(program);
+            gl.useProgram(program);
+
+            // Fullscreen Quad
+            const buffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+
+            const posLoc = gl.getAttribLocation(program, 'position');
+            gl.enableVertexAttribArray(posLoc);
+            gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+            // Get Uniform Locations
+            ['u_time', 'u_resolution', 'u_mouse', 'u_texture', 'u_hasCamera', 'u_hover', 'u_press', 'u_lensDir'].forEach(name => {
+                locations[name] = gl.getUniformLocation(program, name);
+            });
+
+            // Init Texture
+            texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            // 1x1 pixel placeholder
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0,0,0,255]));
+        }
+
+        async function initCamera() {
+            video = document.createElement('video');
+            video.autoplay = true;
+            video.muted = true;
+            video.playsInline = true;
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
+                });
+                video.srcObject = stream;
+                await video.play();
+                state.hasCamera = true;
+                
+                ui.classList.add('active');
+                msg.textContent = "Liquid Metal Button Active";
+            } catch (err) {
+                msg.textContent = "Camera Denied - Simulation Mode";
+                dot.style.backgroundColor = "orange";
+                dot.style.boxShadow = "0 0 10px orange";
+            }
+        }
+
+        // --- Logic ---
+
+        function resize() {
+            state.width = container.clientWidth;
+            state.height = container.clientHeight;
+            canvas.width = state.width;
+            canvas.height = state.height;
+            gl.viewport(0, 0, state.width, state.height);
+        }
+
+        function checkHit(x, y) {
+            const aspect = state.width / state.height;
+            const nx = (x / state.width) * 2 - 1;
+            const ny = -((y / state.height) * 2 - 1);
+            return (Math.abs(nx * aspect) < BTN_HalfW && Math.abs(ny) < BTN_HalfH);
+        }
+
+        function handleStart(x, y) {
+            if (checkHit(x, y)) {
+                state.isPressing = true;
+                submitText.style.transform = "scale(0.95)";
+                // Reverse lens: Set to Concave (-1.0) on press
+                state.targetLensDir = -1.0;
+            }
+        }
+
+        function handleEnd() {
+            state.isPressing = false;
+            submitText.style.transform = "scale(1.0)";
+            // Reset lens: Set to Convex (1.0) on release
+            state.targetLensDir = 1.0;
+        }
+
+        // Event Listeners
+        window.addEventListener('resize', resize);
+        window.addEventListener('mousemove', e => {
+            state.mouseX = e.clientX / state.width;
+            state.mouseY = 1.0 - (e.clientY / state.height);
+            const hit = checkHit(e.clientX, e.clientY);
+            if (hit !== state.isHovering) {
+                state.isHovering = hit;
+                container.style.cursor = hit ? 'pointer' : 'default';
+                submitText.style.letterSpacing = hit ? '0.3em' : '0.2em';
+            }
+        });
+        window.addEventListener('mousedown', e => handleStart(e.clientX, e.clientY));
+        window.addEventListener('mouseup', handleEnd);
+        
+        // Handle Mouse Leave to reset state if dragged out
+        window.addEventListener('mouseleave', handleEnd);
+
+        window.addEventListener('touchstart', e => {
+            if(e.touches.length > 0) {
+                const t = e.touches[0];
+                state.mouseX = t.clientX / state.width;
+                state.mouseY = 1.0 - (t.clientY / state.height);
+                handleStart(t.clientX, t.clientY);
+            }
+        }, {passive: false});
+        window.addEventListener('touchend', handleEnd);
+
+        // --- Render Loop ---
+
+        function animate(now) {
+            gl.uniform1f(locations.u_time, now * 0.001);
+            
+            // Lerp Interaction Values
+            state.hover += ( (state.isHovering ? 1.0 : 0.0) - state.hover ) * 0.1;
+            state.press += ( (state.isPressing ? 1.0 : 0.0) - state.press ) * 0.25;
+            state.lensDir += (state.targetLensDir - state.lensDir) * 0.1;
+
+            if (state.hasCamera && video.readyState >= video.HAVE_CURRENT_DATA) {
+                gl.bindTexture(gl.TEXTURE_2D, texture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+            }
+
+            gl.uniform2f(locations.u_resolution, state.width, state.height);
+            gl.uniform2f(locations.u_mouse, state.mouseX, state.mouseY);
+            gl.uniform1i(locations.u_hasCamera, state.hasCamera);
+            gl.uniform1f(locations.u_hover, state.hover);
+            gl.uniform1f(locations.u_press, state.press);
+            gl.uniform1f(locations.u_lensDir, state.lensDir);
+
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            
+            requestAnimationFrame(animate);
+        }
+
+        // Start
+        initGL();
+        initCamera();
+        resize();
+        requestAnimationFrame(animate);
+
+    </script>
+</body>
+</html>
