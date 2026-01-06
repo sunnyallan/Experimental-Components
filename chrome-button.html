@@ -1,4 +1,4 @@
-!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -321,6 +321,7 @@
                 ui.classList.add('active');
                 msg.textContent = "Liquid Metal Button Active";
             } catch (err) {
+                console.error("Camera access failed:", err);
                 msg.textContent = "Camera Denied - Simulation Mode";
                 dot.style.backgroundColor = "orange";
                 dot.style.boxShadow = "0 0 10px orange";
