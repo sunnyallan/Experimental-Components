@@ -417,7 +417,9 @@
 
         // Start
         initGL();
-        initCamera();
+        // Disable camera for Framer compatibility
+        state.hasCamera = false
+
         resize();
         requestAnimationFrame(animate);
 
