@@ -322,7 +322,7 @@
                 msg.textContent = "Liquid Metal Button Active";
             } catch (err) {
                 console.error("Camera access failed:", err);
-                msg.textContent = "Camera Denied - Simulation Mode";
+                msg.textContent = `Error: ${err.name} - Sim Mode`;
                 dot.style.backgroundColor = "orange";
                 dot.style.boxShadow = "0 0 10px orange";
             }
