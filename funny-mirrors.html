@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Funny Mirrors — Carnival Hall of Mirrors</title>
+<style>
+  :root {
+    --bg: #0d0b14;
+    --accent: #ffd166;
+    --accent2: #ef476f;
+    --text: #fdf6e3;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+    color: var(--text);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  #stage {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* ---------- Top banner ---------- */
+  header {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    padding: 18px 20px 30px;
+    text-align: center;
+    background: linear-gradient(to bottom, rgba(13,11,20,.85), transparent);
+    pointer-events: none;
+    z-index: 5;
+  }
+  header h1 {
+    font-size: clamp(18px, 3.2vw, 30px);
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: var(--accent);
+    text-shadow: 0 0 18px rgba(255, 209, 102, .45);
+  }
+  header p {
+    margin-top: 4px;
+    font-size: clamp(11px, 1.6vw, 14px);
+    opacity: .7;
+    letter-spacing: 1px;
+  }
+
+  /* ---------- Mirror label ---------- */
+  #mirror-name {
+    position: fixed;
+    bottom: 96px;
+    left: 0; right: 0;
+    text-align: center;
+    z-index: 5;
+    pointer-events: none;
+  }
+  #mirror-name .name {
+    display: inline-block;
+    padding: 10px 26px;
+    font-size: clamp(16px, 2.6vw, 24px);
+    font-weight: bold;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--bg);
+    background: var(--accent);
+    border-radius: 999px;
+    box-shadow: 0 4px 24px rgba(255, 209, 102, .35);
+    transition: transform .25s ease, opacity .25s ease;
+  }
+  #mirror-name .desc {
+    margin-top: 8px;
+    font-size: clamp(11px, 1.6vw, 14px);
+    opacity: .75;
+    letter-spacing: 1px;
+  }
+  #mirror-name.switching .name { transform: scale(.85); opacity: 0; }
+
+  /* ---------- Arrows ---------- */
+  .arrow {
+    position: fixed;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 6;
+    width: 58px;
+    height: 58px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 209, 102, .6);
+    background: rgba(13, 11, 20, .55);
+    color: var(--accent);
+    font-size: 26px;
+    line-height: 1;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+    transition: background .2s, transform .15s;
+    user-select: none;
+  }
+  .arrow:hover { background: rgba(255, 209, 102, .2); }
+  .arrow:active { transform: translateY(-50%) scale(.9); }
+  #prev { left: 18px; }
+  #next { right: 18px; }
+
+  /* ---------- Dots ---------- */
+  #dots {
+    position: fixed;
+    bottom: 44px;
+    left: 0; right: 0;
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    z-index: 6;
+  }
+  #dots button {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid var(--accent);
+    background: transparent;
+    cursor: pointer;
+    padding: 0;
+    transition: background .2s, transform .2s;
+  }
+  #dots button.active {
+    background: var(--accent);
+    transform: scale(1.25);
+    box-shadow: 0 0 12px rgba(255, 209, 102, .7);
+  }
+
+  /* ---------- Overlays ---------- */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    text-align: center;
+    padding: 24px;
+    background: radial-gradient(ellipse at center, #1b1530 0%, var(--bg) 75%);
+  }
+  .overlay h2 {
+    font-size: clamp(22px, 4vw, 36px);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .overlay p { max-width: 420px; line-height: 1.5; opacity: .8; }
+  .overlay .big-btn {
+    margin-top: 8px;
+    padding: 14px 40px;
+    font-size: 18px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--bg);
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    box-shadow: 0 6px 30px rgba(239, 71, 111, .45);
+    transition: transform .15s;
+  }
+  .overlay .big-btn:hover { transform: scale(1.05); }
+  .overlay .big-btn:active { transform: scale(.97); }
+  .overlay .emoji { font-size: 54px; }
+  .hidden { display: none !important; }
+
+  @media (max-width: 600px) {
+    .arrow { width: 46px; height: 46px; font-size: 20px; }
+    #prev { left: 8px; }
+    #next { right: 8px; }
+    #mirror-name { bottom: 84px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="stage"><canvas id="glcanvas"></canvas></div>
+
+<header>
+  <h1>🎪 Funny Mirrors</h1>
+  <p>A carnival hall of mirrors, in your browser</p>
+</header>
+
+<div id="mirror-name">
+  <div class="name" id="name-text"></div>
+  <div class="desc" id="desc-text"></div>
+</div>
+
+<button class="arrow" id="prev" aria-label="Previous mirror">&#10094;</button>
+<button class="arrow" id="next" aria-label="Next mirror">&#10095;</button>
+<div id="dots"></div>
+
+<div class="overlay" id="start-overlay">
+  <div class="emoji">🪞</div>
+  <h2>Funny Mirrors</h2>
+  <p>Step right up! Just like the carnival hall of mirrors — your camera becomes a warped, wobbly, hilarious reflection. Your video never leaves your device; everything runs locally with WebGL shaders.</p>
+  <button class="big-btn" id="start-btn">Enter the Hall</button>
+</div>
+
+<div class="overlay hidden" id="error-overlay">
+  <div class="emoji">🚫</div>
+  <h2>No Mirror, No Magic</h2>
+  <p id="error-msg">Camera access was denied or is unavailable. Please allow camera access and reload the page.</p>
+  <button class="big-btn" onclick="location.reload()">Try Again</button>
+</div>
+
+<video id="video" autoplay playsinline muted style="display:none"></video>
+
+<script>
+'use strict';
+
+/* ============================================================
+   Funny Mirrors — WebGL carnival mirrors driven by the webcam.
+   One fragment shader, one uniform per effect; the carousel
+   just switches u_effect (with a crossfade morph on u_mix).
+   ============================================================ */
+
+const MIRRORS = [
+  { name: 'Bulge Belly',   desc: 'The classic convex mirror — big head, bigger belly' },
+  { name: 'Pinch Face',    desc: 'A concave mirror that squeezes you into the middle' },
+  { name: 'Wobbly Jelly',  desc: 'Rippling waves — like looking into shaking water' },
+  { name: 'Stretch Tower', desc: 'Suddenly you are three metres tall' },
+  { name: 'Squash Toad',   desc: 'Short and wide — the pancake mirror' },
+  { name: 'Twister',       desc: 'A dizzy swirl right through the centre' },
+];
+
+const VERT_SRC = `
+attribute vec2 a_pos;
+varying vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+const FRAG_SRC = `
+precision highp float;
+varying vec2 v_uv;
+uniform sampler2D u_tex;
+uniform float u_time;
+uniform int   u_effectA;   // outgoing effect
+uniform int   u_effectB;   // incoming effect
+uniform float u_mix;       // 0 -> A, 1 -> B
+uniform vec2  u_texScale;  // cover-fit scaling
+uniform float u_aspect;    // canvas aspect ratio
+
+// Distort a centred coordinate (-1..1) per effect.
+vec2 warp(vec2 p, int fx) {
+  if (fx == 0) {                       // Bulge
+    float r = length(p);
+    p *= mix(1.0, smoothstep(0.0, 1.6, r), 0.85);
+  } else if (fx == 1) {                // Pinch
+    float r = length(p);
+    p *= mix(1.0, pow(r, 1.6) / max(r, 1e-4), 0.7);
+  } else if (fx == 2) {                // Wobbly jelly
+    p.x += 0.08 * sin(p.y * 7.0 + u_time * 2.2);
+    p.y += 0.08 * sin(p.x * 6.0 + u_time * 1.7);
+  } else if (fx == 3) {                // Stretch tall
+    p.y *= 0.45 + 0.25 * abs(p.y);
+    p.x *= 1.25;
+  } else if (fx == 4) {                // Squash wide
+    p.x *= 0.45 + 0.25 * abs(p.x);
+    p.y *= 1.35;
+  } else if (fx == 5) {                // Swirl
+    float r = length(p);
+    float a = atan(p.y, p.x) + 2.4 * smoothstep(1.1, 0.0, r);
+    p = vec2(cos(a), sin(a)) * r;
+  }
+  return p;
+}
+
+void main() {
+  // Centre coords, aspect-corrected so circles stay circular
+  vec2 p = v_uv * 2.0 - 1.0;
+  p.x *= u_aspect;
+
+  vec2 pa = warp(p, u_effectA);
+  vec2 pb = warp(p, u_effectB);
+  p = mix(pa, pb, smoothstep(0.0, 1.0, u_mix));
+
+  p.x /= u_aspect;
+  vec2 uv = p * 0.5 + 0.5;
+
+  // Mirror horizontally (like a real mirror) + cover-fit
+  uv.x = 1.0 - uv.x;
+  uv = (uv - 0.5) * u_texScale + 0.5;
+
+  // Outside the frame: carnival-tent void
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+    float stripe = step(0.5, fract((v_uv.x + v_uv.y) * 6.0 + u_time * 0.05));
+    gl_FragColor = vec4(mix(vec3(0.05, 0.04, 0.09), vec3(0.10, 0.05, 0.14), stripe), 1.0);
+    return;
+  }
+
+  vec3 col = texture2D(u_tex, uv).rgb;
+
+  // Subtle vignette for the mirror feel
+  float vig = smoothstep(1.5, 0.4, length(v_uv * 2.0 - 1.0));
+  col *= 0.75 + 0.25 * vig;
+
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+const canvas  = document.getElementById('glcanvas');
+const video   = document.getElementById('video');
+const nameEl  = document.getElementById('name-text');
+const descEl  = document.getElementById('desc-text');
+const labelEl = document.getElementById('mirror-name');
+const dotsEl  = document.getElementById('dots');
+
+const gl = canvas.getContext('webgl', { antialias: false })
+        || canvas.getContext('experimental-webgl');
+
+let program, uniforms = {}, texture;
+let current = 0;
+let effectA = 0, effectB = 0, mixT = 1;   // crossfade state
+let lastSwitch = 0;
+const MORPH_MS = 450;
+
+/* ---------- WebGL setup ---------- */
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    throw new Error(gl.getShaderInfoLog(s));
+  }
+  return s;
+}
+
+function initGL() {
+  program = gl.createProgram();
+  gl.attachShader(program, compile(gl.VERTEX_SHADER, VERT_SRC));
+  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAG_SRC));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(gl.getProgramInfoLog(program));
+  }
+  gl.useProgram(program);
+
+  // Fullscreen triangle-strip quad
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(program, 'a_pos');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  for (const u of ['u_tex','u_time','u_effectA','u_effectB','u_mix','u_texScale','u_aspect']) {
+    uniforms[u] = gl.getUniformLocation(program, u);
+  }
+
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.round(canvas.clientWidth  * dpr);
+  const h = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+    gl.viewport(0, 0, w, h);
+  }
+}
+
+/* ---------- Render loop ---------- */
+function render(t) {
+  resize();
+
+  if (video.readyState >= video.HAVE_CURRENT_DATA) {
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video);
+  }
+
+  // cover-fit: scale UVs so the video fills the canvas without distortion
+  const canvasAspect = canvas.width / canvas.height;
+  const videoAspect  = (video.videoWidth || 16) / (video.videoHeight || 9);
+  let sx = 1, sy = 1;
+  if (canvasAspect > videoAspect) sy = videoAspect / canvasAspect;
+  else                            sx = canvasAspect / videoAspect;
+
+  mixT = Math.min(1, (t - lastSwitch) / MORPH_MS);
+
+  gl.uniform1i(uniforms.u_tex, 0);
+  gl.uniform1f(uniforms.u_time, t / 1000);
+  gl.uniform1i(uniforms.u_effectA, effectA);
+  gl.uniform1i(uniforms.u_effectB, effectB);
+  gl.uniform1f(uniforms.u_mix, mixT);
+  gl.uniform2f(uniforms.u_texScale, sx, sy);
+  gl.uniform1f(uniforms.u_aspect, canvasAspect);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  requestAnimationFrame(render);
+}
+
+/* ---------- Carousel ---------- */
+function goTo(index) {
+  const n = MIRRORS.length;
+  const next = ((index % n) + n) % n;
+  if (next === current && mixT >= 1) return;
+
+  effectA = effectB;
+  effectB = next;
+  lastSwitch = performance.now();
+  current = next;
+
+  labelEl.classList.add('switching');
+  setTimeout(() => {
+    nameEl.textContent = MIRRORS[current].name;
+    descEl.textContent = MIRRORS[current].desc;
+    labelEl.classList.remove('switching');
+  }, 200);
+
+  [...dotsEl.children].forEach((d, i) => d.classList.toggle('active', i === current));
+}
+
+function buildDots() {
+  MIRRORS.forEach((m, i) => {
+    const b = document.createElement('button');
+    b.setAttribute('aria-label', m.name);
+    b.addEventListener('click', () => goTo(i));
+    dotsEl.appendChild(b);
+  });
+  nameEl.textContent = MIRRORS[0].name;
+  descEl.textContent = MIRRORS[0].desc;
+  dotsEl.children[0].classList.add('active');
+}
+
+document.getElementById('prev').addEventListener('click', () => goTo(current - 1));
+document.getElementById('next').addEventListener('click', () => goTo(current + 1));
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft')  goTo(current - 1);
+  if (e.key === 'ArrowRight') goTo(current + 1);
+});
+
+// Touch swipe
+let touchX = null;
+window.addEventListener('touchstart', (e) => { touchX = e.touches[0].clientX; }, { passive: true });
+window.addEventListener('touchend', (e) => {
+  if (touchX === null) return;
+  const dx = e.changedTouches[0].clientX - touchX;
+  if (Math.abs(dx) > 50) goTo(current + (dx < 0 ? 1 : -1));
+  touchX = null;
+}, { passive: true });
+
+/* ---------- Camera (permission asked exactly once) ---------- */
+async function start() {
+  document.getElementById('start-overlay').classList.add('hidden');
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw Object.assign(
+        new Error('The camera API needs a secure context. Open this page via https:// or http://localhost — it will not work from a file:// URL.'),
+        { name: 'InsecureContextError' }
+      );
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+
+    initGL();
+    buildDots();
+    requestAnimationFrame(render);
+  } catch (err) {
+    const msg = document.getElementById('error-msg');
+    if (err.name === 'NotAllowedError') {
+      msg.textContent = 'Camera access was denied. Please allow camera access in your browser settings and reload the page.';
+    } else if (err.name === 'NotFoundError') {
+      msg.textContent = 'No camera was found on this device.';
+    } else {
+      msg.textContent = 'Could not start the camera: ' + err.message;
+    }
+    document.getElementById('error-overlay').classList.remove('hidden');
+  }
+}
+
+if (!gl) {
+  document.getElementById('start-overlay').classList.add('hidden');
+  document.getElementById('error-msg').textContent = 'WebGL is not supported in this browser.';
+  document.getElementById('error-overlay').classList.remove('hidden');
+} else {
+  document.getElementById('start-btn').addEventListener('click', start);
+}
+</script>
+</body>
+</html>
