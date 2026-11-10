@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ferrofluid Button</title>
+<!--
+  Ferrofluid Button — a pill-shaped button made of black magnetic liquid.
+
+  · Bring the cursor close: the fluid rises into spikes toward it.
+  · Move away: it pools back into a flat, glossy puddle (with a wobble).
+  · Click: it splashes — an eruption, ripples and droplets that merge back.
+  · Press and hold: the field charges up for a bigger splash on release.
+
+  One self-contained file, no dependencies (Inter is loaded from Google Fonts
+  and falls back to the system font). Raymarched WebGL 1 fragment shader, so
+  it runs in every modern browser. Tweak CONFIG in the script below.
+
+  The <button> is a real button: keyboard, focus and screen readers work, and
+  `click` fires as usual — hook your own handler onto #ferro-button.
+-->
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@500;800&display=swap');
+
+  :root {
+    --accent: #2dd4bf;
+  }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+  }
+
+  body {
+    overflow: hidden;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: radial-gradient(120% 90% at 50% 42%, #ffffff 0%, #eeeeec 62%, #e3e3e0 100%);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  #stage {
+    position: fixed;
+    inset: 0;
+    touch-action: none;
+  }
+
+  #stage canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* invisible hit area laid over the puddle; the label rides on the liquid */
+  #ferro-button {
+    position: absolute;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border-radius: 999px;
+    cursor: pointer;
+    color: #ffffff;
+    font: 800 1.6rem/1 'Inter', system-ui, sans-serif;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    text-shadow:
+      0 0 10px rgba(0, 0, 0, 0.85),
+      0 0 22px rgba(0, 0, 0, 0.6),
+      0 2px 4px rgba(0, 0, 0, 1);
+    outline: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  #ferro-button span {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    /* letter-spacing adds trailing space after the last letter; balance it */
+    padding-left: 0.2em;
+    white-space: nowrap;
+    pointer-events: none;
+    transition: letter-spacing 0.35s ease, opacity 0.2s ease;
+  }
+
+  #ferro-button.charging span {
+    letter-spacing: 0.28em;
+  }
+
+  #ferro-button:focus-visible {
+    box-shadow: 0 0 0 3px #ffffff, 0 0 0 6px var(--accent);
+  }
+
+  .status-ui {
+    position: fixed;
+    bottom: 40px;
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    pointer-events: none;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #b9b9b6;
+    transition: background-color 0.3s, box-shadow 0.3s;
+  }
+
+  .status-text {
+    color: #6b6b68;
+    font: 800 0.75rem/1 'Inter', system-ui, sans-serif;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+
+  .status-ui.active .status-dot {
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <button id="ferro-button" type="button"><span>Submit</span></button>
+</div>
+
+<div class="status-ui" id="status" aria-live="polite">
+  <div class="status-dot"></div>
+  <div class="status-text" id="status-text">Bring the cursor closer</div>
+</div>
+
+<script id="vertex-shader" type="x-shader/x-vertex">
+attribute vec2 aPos;
+void main() {
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}
+</script>
+
+<script id="fragment-shader" type="x-shader/x-fragment">
+precision highp float;
+
+#define MAX_SPLASH 4
+#define MAX_DROPS 14
+
+uniform vec2  uRes;        // canvas size in device px
+uniform float uScale;      // device px per screen-space unit
+uniform float uTime;
+
+uniform vec3  uRo;         // camera
+uniform vec3  uFw;
+uniform vec3  uRt;
+uniform vec3  uUp;
+uniform float uFocal;
+
+uniform vec2  uMagnet;     // magnet position on the puddle (world xz)
+uniform float uStrength;   // field strength (springs; may overshoot)
+uniform float uSpikeH;     // spike height
+uniform float uSpacing;    // spike lattice spacing
+uniform float uHMax;       // highest point in the scene (raymarch skip)
+uniform vec3  uAccent;     // rim-light tint
+
+uniform vec4  uSplash[MAX_SPLASH];  // x, z, start time, power (0 = unused)
+uniform vec4  uDrops[MAX_DROPS];    // x, y, z, radius (0 = unused)
+
+const float HALF_LEN = 0.78;   // stadium: half length of the straight part
+const float RADIUS   = 0.30;   // stadium: end radius / half width
+const float DEPTH    = 0.055;  // resting depth of the puddle
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float sdStadium(vec2 p) {
+  p.x = max(abs(p.x) - HALF_LEN, 0.0);
+  return length(p) - RADIUS;
+}
+
+// offset from the nearest centre of a hexagonal lattice with spacing s
+vec2 hexOffset(vec2 p, float s) {
+  vec2 r = vec2(1.0, 1.7320508) * s;
+  vec2 h = r * 0.5;
+  vec2 a = mod(p, r) - h;
+  vec2 b = mod(p - h, r) - h;
+  return dot(a, a) < dot(b, b) ? a : b;
+}
+
+// magnetic field at a point: the cursor magnet plus splash eruptions
+float fieldAt(vec2 w) {
+  vec2 dm = w - uMagnet;
+  float f = uStrength * exp(-dot(dm, dm) * 12.5);
+  for (int i = 0; i < MAX_SPLASH; i++) {
+    vec4 s = uSplash[i];
+    if (s.w <= 0.0) continue;
+    float t = uTime - s.z;
+    if (t < 0.0 || t > 2.5) continue;
+    vec2 ds = w - s.xy;
+    f += s.w * 1.5 * (1.0 - exp(-28.0 * t)) * exp(-4.2 * t) * exp(-dot(ds, ds) * 22.0);
+  }
+  return f;
+}
+
+float ripples(vec2 p) {
+  float sum = 0.0;
+  for (int i = 0; i < MAX_SPLASH; i++) {
+    vec4 s = uSplash[i];
+    if (s.w <= 0.0) continue;
+    float t = uTime - s.z;
+    if (t < 0.0 || t > 3.0) continue;
+    float r = length(p - s.xy);
+    float front = 0.8 * t;
+    float env = exp(-1.5 * t) * (1.0 - smoothstep(front - 0.02, front + 0.1, r));
+    sum += s.w * 0.034 * env * sin(38.0 * (r - front)) * exp(-1.1 * r);
+  }
+  return sum;
+}
+
+// `slope` returns a bound on how steep the surface is here, so the
+// raymarcher can take small steps among spikes and big ones elsewhere
+float liquidHeight(vec2 p, out float slope) {
+  float d = sdStadium(p);
+  float inside = clamp(-d / 0.12, 0.0, 1.0);
+  float base = DEPTH * (1.0 - pow(1.0 - inside, 3.0));   // rounded meniscus
+  float mask = smoothstep(0.03, 0.17, -d);                // calm near the rim
+
+  float field = fieldAt(p);
+  float mound = 0.075 * field;
+
+  // Rosensweig spikes: a hex lattice that travels with the magnet; each cone
+  // is sized by the field at its own centre, and only appears above a
+  // threshold — so spikes pop up rather than fade in
+  vec2 off = hexOffset(p - uMagnet, uSpacing);
+  vec2 centre = p - off;
+  float fc = fieldAt(centre);
+  float grow = smoothstep(0.12, 0.7, fc) * min(fc, 1.6);
+  float jitter = 0.82 + 0.36 * hash(floor((centre - uMagnet) / uSpacing * 2.0 + 0.5));
+  // concave cone with a slightly rounded tip — a true point is thinner
+  // than a pixel near the top and breaks up into floating specks
+  float x = length(off) / (uSpacing * 0.52);
+  float xs = (sqrt(x * x + 0.012) - 0.1095) / 0.8905;
+  float cone = pow(max(0.0, 1.0 - xs), 1.75);
+  float spikes = uSpikeH * grow * jitter * cone;
+  // from the field at p (smooth), not per spike (which jumps between cells
+  // and would crease the normals in the valleys)
+  float growP = smoothstep(0.05, 0.6, field) * min(field + 0.15, 1.75);
+  slope = 1.5 + 2.2 * uSpikeH * growP * 1.18 / (uSpacing * 0.46);
+
+  // barely-there drift: the pool must read as a mirror when idle
+  float idle = 0.0006 * sin(p.x * 4.0 + uTime * 0.9) * sin(p.y * 5.0 - uTime * 0.7);
+
+  return base + mask * (mound + spikes + ripples(p) + idle);
+}
+
+float smin(float a, float b, float k) {
+  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+float map(vec3 p) {
+  float dxz = sdStadium(p.xz);
+  // inside the puddle the surface is a heightfield (steep spikes, so take
+  // small steps); outside it slopes away below the table, continuous with
+  // the rim so normals don't crease there
+  float slope = 2.0;
+  float h = dxz > 0.0 ? -2.0 * dxz : liquidHeight(p.xz, slope);
+  float d = (p.y - h) / (1.0 + slope);
+  for (int i = 0; i < MAX_DROPS; i++) {
+    vec4 dr = uDrops[i];
+    if (dr.w <= 0.0) continue;
+    d = smin(d, length(p - dr.xyz) - dr.w, 0.045);
+  }
+  return d;
+}
+
+vec3 calcNormal(vec3 p) {
+  const vec2 k = vec2(1.0, -1.0);
+  const float e = 0.0012;
+  return normalize(
+    k.xyy * map(p + k.xyy * e) +
+    k.yyx * map(p + k.yyx * e) +
+    k.yxy * map(p + k.yxy * e) +
+    k.xxx * map(p + k.xxx * e));
+}
+
+float rectLight(vec3 d, vec3 c, vec3 r, vec3 u, vec2 hs, float soft) {
+  float k = dot(d, c);
+  if (k <= 0.0) return 0.0;
+  vec3 q = d / k;
+  float x = abs(dot(q, r));
+  float y = abs(dot(q, u));
+  return (1.0 - smoothstep(hs.x - soft, hs.x, x)) * (1.0 - smoothstep(hs.y - soft, hs.y, y));
+}
+
+// a photo studio: dim walls, a light table below, softboxes and rim strips
+vec3 env(vec3 d) {
+  // near-black walls: steep spike flanks reflect mostly the room, and a lit
+  // room turns them grey — real ferrofluid stays black with sharp glints
+  vec3 col = mix(vec3(0.006), vec3(0.02), smoothstep(-0.1, 0.6, d.y));
+  // below the horizon a spike sees the black pool around it, not the
+  // distant table — so its flanks stay black, as in real ferrofluid
+  col = mix(vec3(0.03), col, smoothstep(-0.12, 0.02, d.y));
+  // key: a long thin softbox overhead — one crisp band on the flat pool
+  col += 30.0 * rectLight(d, normalize(vec3(0.0, 0.78, -0.62)), vec3(1.0, 0.0, 0.0),
+                          normalize(vec3(0.0, 0.62, 0.78)), vec2(1.4, 0.02), 0.012);
+  col += 10.0 * rectLight(d, normalize(vec3(0.0, 0.93, -0.36)), vec3(1.0, 0.0, 0.0),
+                          normalize(vec3(0.0, 0.36, 0.93)), vec2(1.4, 0.012), 0.008);
+  // thin strip lights either side: white glints along the spike edges, with
+  // a slim accent line on one side
+  col += 12.0 * uAccent * rectLight(d, normalize(vec3(-1.0, 0.35, -0.1)), vec3(0.0, 0.0, 1.0),
+                                    vec3(0.0, 1.0, 0.0), vec2(0.1, 0.9), 0.04);
+  col += 18.0 * rectLight(d, normalize(vec3(1.0, 0.4, -0.15)), vec3(0.0, 0.0, -1.0),
+                          vec3(0.0, 1.0, 0.0), vec2(0.16, 0.9), 0.05);
+  col += 12.0 * rectLight(d, normalize(vec3(-0.35, 0.75, 0.55)), vec3(1.0, 0.0, 0.0),
+                          normalize(vec3(0.0, 0.6, -0.8)), vec2(0.6, 0.12), 0.04);
+  return col;
+}
+
+vec2 boxHit(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
+  vec3 inv = 1.0 / rd;
+  vec3 t0 = (bmin - ro) * inv;
+  vec3 t1 = (bmax - ro) * inv;
+  vec3 tmin = min(t0, t1);
+  vec3 tmax = max(t0, t1);
+  return vec2(max(max(tmin.x, tmin.y), tmin.z), min(min(tmax.x, tmax.y), tmax.z));
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uScale;
+  vec3 ro = uRo;
+  vec3 rd = normalize(uFw * uFocal + uRt * uv.x + uUp * uv.y);
+
+  vec2 tb = boxHit(ro, rd, vec3(-1.5, -0.05, -0.8), vec3(1.5, uHMax + 0.02, 0.8));
+  bool hit = false;
+  float t = max(tb.x, 0.0);
+
+  if (tb.x < tb.y && rd.y < 0.0) {
+    for (int i = 0; i < 240; i++) {
+      vec3 p = ro + rd * t;
+      if (p.y > uHMax) {                        // nothing up here: drop down
+        t += (p.y - uHMax) / -rd.y + 0.001;
+        continue;
+      }
+      float d = map(p);
+      if (d < 0.0004 * t) { hit = true; break; }
+      t += max(d, 0.0008);
+      if (t > tb.y || p.y < -0.03) break;
+    }
+  }
+
+  if (hit) {
+    vec3 p = ro + rd * t;
+    vec3 n = calcNormal(p);
+    vec3 v = -rd;
+    float fres = 0.04 + 0.96 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
+    vec3 col = vec3(0.006) + env(reflect(rd, n)) * fres;
+    col = col / (1.0 + col) * 1.12;             // soft tone map, keeps blacks
+    col = pow(col, vec3(1.0 / 2.2));
+    gl_FragColor = vec4(col, 1.0);
+    return;
+  }
+
+  // table: transparent, except contact shadows under the puddle and drops
+  if (rd.y < 0.0) {
+    vec3 q = ro + rd * (-ro.y / rd.y);
+    float sd = sdStadium(q.xz);
+    float a = 0.38 * (1.0 - smoothstep(-0.03, 0.14, sd))
+            + 0.07 * (1.0 - smoothstep(0.0, 0.4, sd));
+    for (int i = 0; i < MAX_DROPS; i++) {
+      vec4 dr = uDrops[i];
+      if (dr.w <= 0.0) continue;
+      float hgt = max(dr.y - dr.w, 0.0);
+      float rad = dr.w * 1.6 + hgt * 0.5;
+      vec2 dd = q.xz - dr.xz;
+      a += 0.3 * exp(-dot(dd, dd) / (rad * rad)) / (1.0 + hgt * 6.0);
+    }
+    gl_FragColor = vec4(0.0, 0.0, 0.0, clamp(a, 0.0, 0.6));
+    return;
+  }
+
+  gl_FragColor = vec4(0.0);
+}
+</script>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------------------------------------------------------------- config
+  const CONFIG = {
+    accent: '#2dd4bf',   // rim-light tint (also the status dot); '#ffffff' for neutral
+    maxWidth: 560,       // on-screen width of the puddle, in CSS px
+    widthRatio: 0.78,    // …but never wider than this share of the viewport
+    spikeHeight: 0.22,   // how tall the spikes stand
+    spacing: 0.105,      // spike lattice spacing (smaller = more, finer spikes)
+    droplets: true,      // fling droplets on click
+    maxDpr: 2,           // render resolution cap
+  };
+
+  // must match the constants in the fragment shader
+  const HALF_LEN = 0.78;
+  const RADIUS = 0.30;
+  const DEPTH = 0.055;
+  const MAX_SPLASH = 4;
+  const MAX_DROPS = 14;
+
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const stage = document.getElementById('stage');
+  const canvas = document.getElementById('gl');
+  const button = document.getElementById('ferro-button');
+  const status = document.getElementById('status');
+  const statusText = document.getElementById('status-text');
+
+  document.documentElement.style.setProperty('--accent', CONFIG.accent);
+
+  const gl = canvas.getContext('webgl', { premultipliedAlpha: true, antialias: false, alpha: true });
+  if (!gl) {
+    statusText.textContent = 'WebGL is not available';
+    return;
+  }
+
+  // ---------------------------------------------------------------- shaders
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(s));
+      return null;
+    }
+    return s;
+  }
+  const vs = compile(gl.VERTEX_SHADER, document.getElementById('vertex-shader').textContent);
+  const fs = compile(gl.FRAGMENT_SHADER, document.getElementById('fragment-shader').textContent);
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog));
+    statusText.textContent = 'Shader failed to compile';
+    return;
+  }
+  gl.useProgram(prog);
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  const U = {};
+  for (const name of ['uRes', 'uScale', 'uTime', 'uRo', 'uFw', 'uRt', 'uUp', 'uFocal', 'uMagnet',
+    'uStrength', 'uSpikeH', 'uSpacing', 'uHMax', 'uAccent', 'uSplash', 'uDrops']) {
+    U[name] = gl.getUniformLocation(prog, name);
+  }
+
+  // ---------------------------------------------------------------- camera
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+  const mul = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const norm = (a) => mul(a, 1 / Math.hypot(a[0], a[1], a[2]));
+
+  const ELEV = 50 * Math.PI / 180;
+  const DIST = 3.4;
+  const FOCAL = 2.2;
+  const TARGET = [0, 0.03, 0];
+  const ro = add(TARGET, [0, Math.sin(ELEV) * DIST, Math.cos(ELEV) * DIST]);
+  const fw = norm(sub(TARGET, ro));
+  const rt = norm(cross(fw, [0, 1, 0]));
+  const up = cross(rt, fw);
+
+  let cssW = 0, cssH = 0, dpr = 1, scaleCss = 1;
+
+  function project(p) {
+    const v = sub(p, ro);
+    const z = dot(v, fw);
+    return [cssW / 2 + (dot(v, rt) * FOCAL / z) * scaleCss, cssH / 2 - (dot(v, up) * FOCAL / z) * scaleCss];
+  }
+
+  // screen point (CSS px) → point on the puddle's surface plane
+  function unproject(px, py, planeY = DEPTH) {
+    const ux = (px - cssW / 2) / scaleCss;
+    const uy = -(py - cssH / 2) / scaleCss;
+    const rd = norm(add(add(mul(fw, FOCAL), mul(rt, ux)), mul(up, uy)));
+    if (rd[1] >= 0) return null;
+    const t = (planeY - ro[1]) / rd[1];
+    return add(ro, mul(rd, t));
+  }
+
+  function sdStadium(x, z) {
+    const px = Math.max(Math.abs(x) - HALF_LEN, 0);
+    return Math.hypot(px, z) - RADIUS;
+  }
+
+  // nearest point at least `margin` inside the stadium
+  function clampInside(x, z, margin) {
+    const cx = Math.max(-HALF_LEN, Math.min(HALF_LEN, x));
+    const dx = x - cx;
+    const len = Math.hypot(dx, z);
+    const maxR = RADIUS - margin;
+    if (len <= maxR) return [x, z];
+    return [cx + dx / len * maxR, z / len * maxR];
+  }
+
+  // ---------------------------------------------------------------- layout
+  let qualityDpr = CONFIG.maxDpr;
+
+  function resize() {
+    cssW = stage.clientWidth;
+    cssH = stage.clientHeight;
+    dpr = Math.min(window.devicePixelRatio || 1, qualityDpr);
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+
+    // size the scene so the puddle spans the configured width
+    scaleCss = 1;
+    const a = project([-(HALF_LEN + RADIUS), DEPTH, 0]);
+    const b = project([HALF_LEN + RADIUS, DEPTH, 0]);
+    const targetW = Math.min(CONFIG.maxWidth, cssW * CONFIG.widthRatio);
+    scaleCss = targetW / (b[0] - a[0]);
+
+    // hit area = screen bounds of the puddle outline
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < 64; i++) {
+      const ang = (i / 64) * Math.PI * 2;
+      const side = Math.cos(ang) >= 0 ? HALF_LEN : -HALF_LEN;
+      const p = project([side + Math.cos(ang) * RADIUS, DEPTH, Math.sin(ang) * RADIUS]);
+      x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]);
+      x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]);
+    }
+    Object.assign(button.style, {
+      left: x0 + 'px',
+      top: y0 + 'px',
+      width: (x1 - x0) + 'px',
+      height: (y1 - y0) + 'px',
+      fontSize: Math.max(14, (y1 - y0) * 0.2) + 'px',
+    });
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------------------------------------------------------------- state
+  const state = {
+    magnet: [0, 0],
+    magnetTarget: [0, 0],
+    strength: 0,
+    velocity: 0,
+    strengthTarget: 0,
+    proximity: 0,        // field from cursor distance alone, before any charge
+    spikeH: CONFIG.spikeHeight,
+    charging: false,
+    charge: 0,
+    lastSplash: -10,
+  };
+  const splashes = new Float32Array(MAX_SPLASH * 4);
+  let splashIndex = 0;
+  const drops = [];
+  const dropBuf = new Float32Array(MAX_DROPS * 4);
+  let touchRelease = 0;
+
+  function setMagnetFromScreen(px, py) {
+    const hit = unproject(px, py);
+    if (!hit) return null;
+    const dist = Math.max(0, sdStadium(hit[0], hit[2]));
+    state.magnetTarget = clampInside(hit[0], hit[2], 0.1);
+    return dist;
+  }
+
+  function splash(power) {
+    const [x, z] = state.magnet;
+    const o = splashIndex * 4;
+    splashes[o] = x;
+    splashes[o + 1] = z;
+    splashes[o + 2] = now;
+    splashes[o + 3] = reducedMotion ? power * 0.4 : power;
+    splashIndex = (splashIndex + 1) % MAX_SPLASH;
+    state.lastSplash = now;
+
+    // the field releases: the fluid drops and wobbles back
+    state.velocity -= 5 * power;
+
+    if (!CONFIG.droplets || reducedMotion) return;
+    const count = Math.min(MAX_DROPS - drops.length, Math.round(5 + 6 * power));
+    for (let i = 0; i < count; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const out = 0.25 + Math.random() * 0.35;
+      drops.push({
+        p: [x + Math.cos(ang) * 0.03, DEPTH + 0.06, z + Math.sin(ang) * 0.03],
+        v: [Math.cos(ang) * out * power, (1.7 + Math.random() * 0.8) * Math.sqrt(power), Math.sin(ang) * out * power],
+        r: 0.03 + Math.random() * 0.025,
+        landed: false,
+        merging: false,
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------- input
+  window.addEventListener('pointermove', (e) => {
+    const dist = setMagnetFromScreen(e.clientX, e.clientY);
+    if (dist === null) return;
+    if (e.pointerType === 'touch' && !state.charging) return;
+    // the field fades in as the cursor approaches the puddle
+    const t = Math.max(0, Math.min(1, 1 - dist / 0.75));
+    state.proximity = t * t * (3 - 2 * t);
+    if (!state.charging) state.strengthTarget = state.proximity;
+  }, { passive: true });
+
+  document.documentElement.addEventListener('pointerleave', () => {
+    state.proximity = 0;
+    if (!state.charging) state.strengthTarget = 0;
+  });
+
+  button.addEventListener('pointerdown', (e) => {
+    setMagnetFromScreen(e.clientX, e.clientY);
+    if (e.pointerType === 'touch') {
+      state.magnet = state.magnetTarget.slice();
+      state.strengthTarget = 1;
+    }
+    state.charging = true;
+    state.charge = 0;
+    button.classList.add('charging');
+    try { button.setPointerCapture(e.pointerId); } catch (_) { /* release still fires on the button */ }
+  });
+
+  function release(e) {
+    if (!state.charging) return;
+    state.charging = false;
+    button.classList.remove('charging');
+    splash(0.8 + 0.7 * state.charge);
+    state.charge = 0;
+    state.spikeH = CONFIG.spikeHeight;
+    state.strengthTarget = state.proximity;
+    if (e && e.pointerType === 'touch') touchRelease = now + 0.7;
+  }
+  button.addEventListener('pointerup', release);
+  button.addEventListener('pointercancel', release);
+
+  // keyboard activation (Enter / Space) fires click with detail === 0
+  button.addEventListener('click', (e) => {
+    if (e.detail === 0) {
+      state.magnetTarget = [0, 0];
+      state.magnet = [0, 0];
+      state.strength = Math.max(state.strength, 0.6);
+      splash(0.9);
+    }
+  });
+  button.addEventListener('focus', () => {
+    if (!state.strengthTarget) {
+      state.magnetTarget = [0, 0];
+      state.strengthTarget = 0.6;
+    }
+  });
+  button.addEventListener('blur', () => {
+    if (!state.charging) state.strengthTarget = 0;
+  });
+
+  // ---------------------------------------------------------------- loop
+  let now = 0;
+  let last = performance.now();
+  let visible = true;
+  let slowFrames = 0;
+
+  new IntersectionObserver((entries) => {
+    visible = entries[0].isIntersecting;
+  }).observe(stage);
+
+  function step(dt) {
+    // charging: hold to build a stronger, tighter field
+    if (state.charging) {
+      state.charge = Math.min(1, state.charge + dt * 1.1);
+      state.strengthTarget = 1 + 0.45 * state.charge;
+      state.spikeH = CONFIG.spikeHeight * (1 + 0.45 * state.charge);
+    }
+    if (touchRelease && now > touchRelease) {
+      touchRelease = 0;
+      state.strengthTarget = 0;
+    }
+
+    // field strength on an under-damped spring: overshoots a little, so the
+    // fluid wobbles as it settles back into a pool
+    const k = reducedMotion ? 40 : 70;
+    const c = reducedMotion ? 13 : 10;
+    state.velocity += (k * (state.strengthTarget - state.strength) - c * state.velocity) * dt;
+    state.strength += state.velocity * dt;
+
+    // the spikes chase the magnet like a liquid would — quick but not instant
+    const follow = 1 - Math.exp(-dt * 9);
+    state.magnet[0] += (state.magnetTarget[0] - state.magnet[0]) * follow;
+    state.magnet[1] += (state.magnetTarget[1] - state.magnet[1]) * follow;
+
+    // droplets: fly, land, bead on the table, slide home and merge
+    for (let i = drops.length - 1; i >= 0; i--) {
+      const d = drops[i];
+      if (d.merging) {
+        d.r *= Math.pow(0.02, dt);              // sink back into the pool
+        if (d.r < 0.004) drops.splice(i, 1);
+        continue;
+      }
+      const inside = sdStadium(d.p[0], d.p[2]) < -0.02;
+      if (!d.landed) {
+        d.v[1] -= 6.5 * dt;
+        d.p = add(d.p, mul(d.v, dt));
+        const floorY = inside ? DEPTH : 0;
+        if (d.p[1] - d.r * 0.4 < floorY && d.v[1] < 0) {
+          if (inside) d.merging = true;
+          else {
+            d.landed = true;
+            d.p[1] = d.r * 0.85;
+          }
+        }
+      } else {
+        // a bead on the table is pulled back toward the magnetised pool
+        const [cx, cz] = clampInside(d.p[0], d.p[2], 0.05);
+        const tx = cx - d.p[0], tz = cz - d.p[2];
+        const len = Math.hypot(tx, tz) || 1;
+        d.v[0] = d.v[0] * Math.pow(0.05, dt) + (tx / len) * 2.2 * dt;
+        d.v[2] = d.v[2] * Math.pow(0.05, dt) + (tz / len) * 2.2 * dt;
+        d.p[0] += d.v[0] * dt;
+        d.p[2] += d.v[2] * dt;
+        if (inside) d.merging = true;
+      }
+    }
+
+    // status line
+    let label;
+    if (state.charging) label = 'Charging…';
+    else if (now - state.lastSplash < 0.9) label = 'Splash!';
+    else if (state.strength > 0.3) label = 'Magnetised';
+    else label = 'Bring the cursor closer';
+    if (statusText.textContent !== label) statusText.textContent = label;
+    status.classList.toggle('active', state.strength > 0.3 || state.charging);
+  }
+
+  function render() {
+    let hMax = DEPTH + 0.075 * 2.2 + state.spikeH * 1.95 + 0.08;
+    dropBuf.fill(0);
+    drops.forEach((d, i) => {
+      dropBuf.set([d.p[0], d.p[1], d.p[2], d.r], i * 4);
+      hMax = Math.max(hMax, d.p[1] + d.r + 0.05);
+    });
+
+    gl.uniform2f(U.uRes, canvas.width, canvas.height);
+    gl.uniform1f(U.uScale, scaleCss * dpr);
+    gl.uniform1f(U.uTime, now);
+    gl.uniform3fv(U.uRo, ro);
+    gl.uniform3fv(U.uFw, fw);
+    gl.uniform3fv(U.uRt, rt);
+    gl.uniform3fv(U.uUp, up);
+    gl.uniform1f(U.uFocal, FOCAL);
+    gl.uniform2f(U.uMagnet, state.magnet[0], state.magnet[1]);
+    gl.uniform1f(U.uStrength, state.strength);
+    gl.uniform1f(U.uSpikeH, state.spikeH);
+    gl.uniform1f(U.uSpacing, CONFIG.spacing);
+    gl.uniform1f(U.uHMax, hMax);
+    gl.uniform3fv(U.uAccent, hexToRgb(CONFIG.accent));
+    gl.uniform4fv(U.uSplash, splashes);
+    gl.uniform4fv(U.uDrops, dropBuf);
+
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  function hexToRgb(hex) {
+    const n = parseInt(hex.replace('#', ''), 16);
+    return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
+  }
+
+  function frame(t) {
+    requestAnimationFrame(frame);
+    const dt = Math.min(0.05, Math.max(0.001, (t - last) / 1000));
+    last = t;
+    if (!visible || document.hidden) return;
+    now += dt;
+
+    // adaptive quality: if frames run long, render at a lower resolution
+    if (dt > 0.03) slowFrames++;
+    else slowFrames = Math.max(0, slowFrames - 1);
+    if (slowFrames > 40 && qualityDpr > 1) {
+      qualityDpr = Math.max(1, qualityDpr - 0.5);
+      slowFrames = 0;
+      resize();
+    }
+
+    step(dt);
+    render();
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
