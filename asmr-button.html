@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASMR Button</title>
+<!--
+  ASMR Button — a button covered in soft fur you can stroke.
+
+  · Move across it: the fur combs in your direction and leaves a trail,
+    like drawing on velvet, then slowly springs back.
+  · Rest on it: the fur parts around the cursor.
+  · Press: it dents under your finger. Release: it springs back and puffs up.
+  · Works with a finger on touch screens too.
+  · SOUND (top right, off by default): a soft brushing hiss that follows
+    your stroke, a muffled thump on press, an airy fluff on release — all
+    generated in code, no audio files.
+
+  The fur is drawn in a WebGL shader as 40 stacked "shell" layers (the
+  standard real-time fur technique from games), with hair-style lighting.
+  Your strokes paint into a small "comb map" of which way the fur leans,
+  which relaxes back over time. No dependencies; tweak CONFIG below.
+
+  The <button> is a real button: keyboard, focus and screen readers work,
+  and `click` fires as usual — hook your own handler onto #asmr-button.
+-->
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@800&display=swap');
+
+  :root { --accent: #2dd4bf; }
+
+  html, body { margin: 0; height: 100%; }
+
+  body {
+    overflow: hidden;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: radial-gradient(120% 90% at 50% 42%, #ffffff 0%, #eeeeec 62%, #e3e3e0 100%);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  #stage {
+    position: fixed;
+    inset: 0;
+    touch-action: none;
+  }
+
+  #stage canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* invisible hit area over the fur; the label sits on top like a tag */
+  #asmr-button {
+    position: absolute;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border-radius: 999px;
+    cursor: pointer;
+    color: #030318;
+    font: 800 1.5rem/1 'Inter', system-ui, sans-serif;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    outline: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  #asmr-button span {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    padding-left: 0.2em; /* balance the trailing letter-spacing */
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0.82;
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.7), 0 0 14px rgba(255, 255, 255, 0.9);
+    transition: transform 0.15s ease;
+  }
+
+  #asmr-button.pressed span { transform: translate(-50%, calc(-50% + 2px)); }
+
+  #asmr-button:focus-visible { box-shadow: 0 0 0 3px #ffffff, 0 0 0 6px var(--accent); }
+
+  .sound-toggle {
+    position: fixed;
+    top: 22px;
+    right: 22px;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px 9px 16px;
+    border: 1px solid #d9d9d5;
+    border-radius: 999px;
+    background: #ffffff;
+    color: #030318;
+    font: 800 0.72rem/1 'Inter', system-ui, sans-serif;
+    letter-spacing: 0.2em;
+    cursor: pointer;
+  }
+  .sound-toggle .switch {
+    position: relative;
+    width: 34px;
+    height: 20px;
+    border-radius: 999px;
+    background: #d9d9d5;
+    transition: background-color 0.2s;
+  }
+  .sound-toggle .switch::after {
+    content: '';
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #ffffff;
+    transition: transform 0.2s;
+  }
+  .sound-toggle[aria-pressed="true"] .switch { background: var(--accent); }
+  .sound-toggle[aria-pressed="true"] .switch::after { transform: translateX(14px); }
+  .sound-toggle:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+
+  .status-ui {
+    position: fixed;
+    bottom: 40px;
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    pointer-events: none;
+  }
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #b9b9b6;
+    transition: background-color 0.3s, box-shadow 0.3s;
+  }
+  .status-text {
+    color: #6b6b68;
+    font: 800 0.75rem/1 'Inter', system-ui, sans-serif;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+  .status-ui.active .status-dot {
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <button id="asmr-button" type="button"><span>Submit</span></button>
+</div>
+
+<button class="sound-toggle" id="sound" type="button" aria-pressed="false">
+  SOUND <span class="switch" aria-hidden="true"></span>
+</button>
+
+<div class="status-ui" id="status" aria-live="polite">
+  <div class="status-dot"></div>
+  <div class="status-text" id="status-text">Stroke the fur</div>
+</div>
+
+<script id="vertex-shader" type="x-shader/x-vertex">
+attribute vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<script id="fragment-shader" type="x-shader/x-fragment">
+precision highp float;
+
+uniform vec2  uRes;        // canvas size, device px
+uniform float uDpr;
+uniform vec2  uC;          // button centre, css px (y down)
+uniform vec2  uHalf;       // button half size, css px
+uniform float uLen;        // fur length, css px
+uniform float uCell;       // strand spacing, css px
+uniform float uTime;
+uniform float uPress;      // whole-button squash, 0..1
+uniform float uPoof;       // release spring: >0 fur stands up and puffs out
+uniform float uBreeze;     // idle sway, 0..1
+uniform vec3  uBase;       // fur colour
+uniform vec3  uTip;        // tip tint
+uniform sampler2D uField;  // comb map: rg = lean direction, b = flattened
+uniform vec2  uFieldMin;   // comb map bounds, css px
+uniform vec2  uFieldSize;
+
+const int LAYERS = 40;
+
+float sdPill(vec2 p) {
+  float r = uHalf.y;
+  vec2 q = abs(p - uC) - uHalf + r;
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+// smooth value noise, for tufts: neighbouring strands lean together
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  float a = fract(sin(dot(i, vec2(127.1, 311.7))) * 43758.5453);
+  float b = fract(sin(dot(i + vec2(1.0, 0.0), vec2(127.1, 311.7))) * 43758.5453);
+  float c = fract(sin(dot(i + vec2(0.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
+  float d = fract(sin(dot(i + vec2(1.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+vec2 hash2(vec2 p) {
+  p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+  return fract(sin(p) * 43758.5453);
+}
+
+void main() {
+  vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y) / uDpr;
+  float edge = sdPill(p);
+
+  // soft contact shadow under the button
+  float shadow = 0.2 * (1.0 - smoothstep(-8.0, 30.0, sdPill(p - vec2(0.0, 10.0))));
+  if (edge > uLen * 1.4) {
+    gl_FragColor = vec4(0.0, 0.0, 0.0, shadow);
+    return;
+  }
+
+  // how the fur leans here: the comb map, idle sway and the release shiver
+  vec4 f = texture2D(uField, (p - uFieldMin) / uFieldSize);
+  vec2 comb = f.rg * 2.0 - 1.0;
+  // stroked fur lies flatter and smoother than the untouched coat
+  float combed = clamp(length(comb), 0.0, 1.0);
+  float squash = clamp(f.b * 1.2 + uPress * 0.35 + combed * 0.35, 0.0, 0.9);
+  vec2 sway = vec2(sin(uTime * 0.7 + p.y * 0.011), cos(uTime * 0.55 + p.x * 0.009)) * 0.07 * uBreeze;
+  // flattened fur lies down: it leans further and stands lower
+  vec2 tuft = vec2(vnoise(p / (uCell * 7.0)), vnoise(p / (uCell * 7.0) + 17.3)) - 0.5;
+  // a cushion, not a slab: the fur splays outward over the rounded rim
+  vec2 e = vec2(0.6, 0.0);
+  vec2 g = normalize(vec2(sdPill(p + e.xy) - sdPill(p - e.xy), sdPill(p + e.yx) - sdPill(p - e.yx)) + 1e-5);
+  float depth = clamp(-edge / (uHalf.y * 0.9), 0.0, 1.0);
+  vec2 splay = g * pow(1.0 - depth, 2.0) * 0.85;
+  vec2 lean = (comb + sway + splay + tuft * 0.45 * (1.0 - combed)) * (1.0 + squash * 0.8);
+  // release: the coat stands up and puffs out, then settles
+  lean *= 1.0 - 0.45 * max(uPoof, 0.0);
+  squash = clamp(squash - uPoof * 0.35, 0.0, 0.9);
+  vec2 tilt = vec2(0.0, -0.42) * (1.0 - squash * 0.6);   // tips sit above roots
+
+  vec3 L = normalize(vec3(-0.45, -0.65, 0.7));
+  vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
+
+  for (int i = LAYERS - 1; i >= 0; i--) {
+    float h = (float(i) + 0.5) / float(LAYERS);
+    // a strand curves as it rises: its offset grows faster near the tip
+    vec2 off = (tilt * h + lean * pow(h, 1.6)) * uLen;
+    vec2 s = p - off;                        // the root under this layer's point
+    if (sdPill(s) > 0.0) continue;           // fur only grows on the button
+    vec2 cell = floor(s / uCell);
+    vec2 rnd = hash2(cell);
+    vec2 root = (cell + 0.2 + 0.6 * rnd) * uCell;
+    float len = (0.72 + 0.28 * rnd.x) * (1.0 - squash * 0.55) * (1.0 + 0.12 * uPoof);
+    if (h > len) continue;
+    float k = h / len;
+    float radius = uCell * 0.74 * pow(1.0 - k, 0.35) + 0.22;
+    if (distance(s, root) > radius) continue;
+
+    // hair lighting: shading depends on the strand's direction, not a normal
+    vec3 T = normalize(vec3((tilt + lean * 1.6 * pow(h, 0.6)), 0.55));
+    float tl = dot(T, L);
+    float th = dot(T, H);
+    float diffuse = 0.74 + 0.26 * sqrt(max(0.0, 1.0 - tl * tl));
+    float spec = pow(sqrt(max(0.0, 1.0 - th * th)), 60.0) * 0.45 * k;
+    float ao = mix(0.66, 1.0, pow(k, 0.7));   // roots sit in their own shadow
+    // nap: brushed fur catches the light differently depending on which
+    // way it was combed (lighter toward the light, darker away) — this is
+    // what makes a stroke leave a visible trail, like velvet
+    float nap = 1.0 + 0.42 * dot(comb, normalize(vec2(-0.55, -0.85))) * smoothstep(0.2, 0.9, k);
+    vec3 col = uBase * mix(0.9, 1.06, rnd.y) * diffuse * ao * 1.12 * nap;
+    col = mix(col, uTip, smoothstep(0.82, 1.0, k) * 0.1);
+    // cushion lighting from the strand's root: bright on the crown, rolling
+    // into shadow over the rim, darker where a finger presses in
+    float de = sdPill(s);
+    vec2 gs = normalize(vec2(sdPill(s + e.xy) - sdPill(s - e.xy), sdPill(s + e.yx) - sdPill(s - e.yx)) + 1e-5);
+    float t = clamp(-de / (uHalf.y * 0.95), 0.0, 1.0);
+    vec3 N = normalize(vec3(gs * pow(1.0 - t, 1.5) * 1.7, 1.0));
+    float dome = clamp(0.48 + 0.66 * dot(N, L), 0.42, 1.12);
+    col *= dome * (1.0 - 0.4 * f.b);
+    col += spec;
+    gl_FragColor = vec4(col, 1.0);
+    return;
+  }
+
+  // between the strands: the dense undercoat
+  if (edge < 0.0) {
+    gl_FragColor = vec4(uBase * 0.45, 1.0);
+  } else {
+    gl_FragColor = vec4(0.0, 0.0, 0.0, shadow);
+  }
+}
+</script>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------------------------------------------------------------- config
+  const CONFIG = {
+    furColor: '#f6ede0',   // the coat
+    tipColor: '#2dd4bf',   // faint tint at the tips ('#f4eee4' for none)
+    accent: '#2dd4bf',     // status dot, sound switch
+    maxWidth: 520,         // button width, CSS px
+    widthRatio: 0.8,       // …never wider than this share of the viewport
+    furLength: 24,         // CSS px
+    density: 2.3,          // strand spacing in CSS px (smaller = denser)
+    recover: 1.8,          // seconds for combed fur to spring back
+    brush: 40,             // stroke radius, CSS px
+    maxDpr: 2,
+  };
+
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const stage = document.getElementById('stage');
+  const canvas = document.getElementById('gl');
+  const button = document.getElementById('asmr-button');
+  const statusEl = document.getElementById('status');
+  const statusText = document.getElementById('status-text');
+  const soundBtn = document.getElementById('sound');
+  document.documentElement.style.setProperty('--accent', CONFIG.accent);
+
+  const gl = canvas.getContext('webgl', { premultipliedAlpha: false, alpha: true, antialias: false });
+  if (!gl) { statusText.textContent = 'WebGL is not available'; return; }
+
+  // ---------------------------------------------------------------- shaders
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, document.getElementById('vertex-shader').textContent));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, document.getElementById('fragment-shader').textContent));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog));
+    statusText.textContent = 'Shader failed to compile';
+    return;
+  }
+  gl.useProgram(prog);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  const U = {};
+  for (const n of ['uRes', 'uDpr', 'uC', 'uHalf', 'uLen', 'uCell', 'uTime', 'uPress', 'uPoof',
+    'uBreeze', 'uBase', 'uTip', 'uField', 'uFieldMin', 'uFieldSize']) U[n] = gl.getUniformLocation(prog, n);
+
+  const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+  const lin = (c) => c;
+  gl.uniform3fv(U.uBase, lin(hex(CONFIG.furColor)));
+  gl.uniform3fv(U.uTip, lin(hex(CONFIG.tipColor)));
+
+  // ---------------------------------------------------------------- comb map
+  // a small grid over the button: which way the fur leans (x, y in -1..1)
+  // and how flattened it is (0..1). Strokes write into it; it relaxes back.
+  const FW = 160, FH = 56;
+  const fx = new Float32Array(FW * FH);
+  const fy = new Float32Array(FW * FH);
+  const fz = new Float32Array(FW * FH);
+  const fieldBytes = new Uint8Array(FW * FH * 4);
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  // ---------------------------------------------------------------- layout
+  let dpr = 1, cssW = 0, cssH = 0;
+  const btn = { cx: 0, cy: 0, hw: 0, hh: 0 };
+  const field = { x: 0, y: 0, w: 1, h: 1 };
+
+  function resize() {
+    cssW = stage.clientWidth;
+    cssH = stage.clientHeight;
+    dpr = Math.min(devicePixelRatio || 1, CONFIG.maxDpr);
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+
+    const w = Math.min(CONFIG.maxWidth, cssW * CONFIG.widthRatio);
+    const h = w * 0.29;
+    btn.cx = cssW / 2; btn.cy = cssH / 2; btn.hw = w / 2; btn.hh = h / 2;
+    const m = CONFIG.furLength * 2;
+    field.x = btn.cx - btn.hw - m; field.y = btn.cy - btn.hh - m;
+    field.w = w + m * 2; field.h = h + m * 2;
+
+    Object.assign(button.style, {
+      left: (btn.cx - btn.hw) + 'px', top: (btn.cy - btn.hh) + 'px',
+      width: w + 'px', height: h + 'px', fontSize: Math.max(14, h * 0.17) + 'px',
+    });
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  const sdPill = (x, y) => {
+    const r = btn.hh;
+    const qx = Math.abs(x - btn.cx) - btn.hw + r, qy = Math.abs(y - btn.cy) - btn.hh + r;
+    return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - r;
+  };
+
+  // ---------------------------------------------------------------- input
+  const ptr = { x: -1e4, y: -1e4, vx: 0, vy: 0, t: 0, inside: false, down: false };
+  let press = 0, pressTarget = 0, lastStroke = -10, released = -10;
+  let now = 0;
+
+  function onMove(e) {
+    const t = performance.now() / 1000;
+    const dt = Math.max(0.004, t - ptr.t);
+    if (ptr.t && t - ptr.t < 0.1) {
+      const k = 0.5;
+      ptr.vx += ((e.clientX - ptr.x) / dt - ptr.vx) * k;
+      ptr.vy += ((e.clientY - ptr.y) / dt - ptr.vy) * k;
+    } else {
+      ptr.vx = ptr.vy = 0;
+    }
+    ptr.x = e.clientX; ptr.y = e.clientY; ptr.t = t;
+  }
+  addEventListener('pointermove', onMove, { passive: true });
+  addEventListener('pointerdown', onMove, { passive: true });
+  document.documentElement.addEventListener('pointerleave', () => { ptr.x = ptr.y = -1e4; ptr.vx = ptr.vy = 0; });
+
+  button.addEventListener('pointerdown', (e) => {
+    ptr.down = true;
+    pressTarget = 1;
+    button.classList.add('pressed');
+    try { button.setPointerCapture(e.pointerId); } catch (_) { /* release still fires */ }
+    sound.thump();
+  });
+  const release = () => {
+    if (!ptr.down) return;
+    ptr.down = false;
+    pressTarget = 0;
+    released = now;
+    button.classList.remove('pressed');
+    sound.fluff();
+  };
+  button.addEventListener('pointerup', release);
+  button.addEventListener('pointercancel', release);
+  // keyboard activation (Enter / Space) fires click with detail === 0
+  button.addEventListener('click', (e) => {
+    if (e.detail === 0) { press = 0.8; released = now; sound.thump(); setTimeout(() => sound.fluff(), 120); }
+  });
+
+  // ---------------------------------------------------------------- comb update
+  function updateField(dt) {
+    const relax = Math.exp(-dt / CONFIG.recover);
+    const unflat = Math.exp(-dt / 0.4);
+    for (let i = 0; i < fx.length; i++) { fx[i] *= relax; fy[i] *= relax; fz[i] *= unflat; }
+
+    const speed = Math.hypot(ptr.vx, ptr.vy);
+    const near = sdPill(ptr.x, ptr.y) < CONFIG.brush * 0.5;
+    ptr.inside = near;
+    if (!near) return speed;
+
+    const cw = field.w / FW, ch = field.h / FH;
+    // a press covers more than a passing stroke, like a whole fingertip
+    const R = ptr.down ? CONFIG.brush * 1.6 : CONFIG.brush;
+    const gx0 = Math.max(0, Math.floor((ptr.x - R - field.x) / cw));
+    const gx1 = Math.min(FW - 1, Math.ceil((ptr.x + R - field.x) / cw));
+    const gy0 = Math.max(0, Math.floor((ptr.y - R - field.y) / ch));
+    const gy1 = Math.min(FH - 1, Math.ceil((ptr.y + R - field.y) / ch));
+    const dirx = speed > 1 ? ptr.vx / speed : 0, diry = speed > 1 ? ptr.vy / speed : 0;
+    // a fast stroke combs fully; a slow drift nudges
+    const comb = Math.min(1, speed / 500);
+    // fur flips almost on contact: a passing stroke has only a few frames
+    const combRate = 1 - Math.exp(-dt * 45 * comb);
+    // resting: the fur parts around the cursor
+    // pressing pushes the fur aside firmly, like a finger sinking into plush
+    const part = ptr.down ? 1 - Math.exp(-dt * 18) : speed < 50 ? 1 - Math.exp(-dt * 4) : 0;
+
+    for (let gy = gy0; gy <= gy1; gy++) {
+      for (let gx = gx0; gx <= gx1; gx++) {
+        const cx = field.x + (gx + 0.5) * cw, cy = field.y + (gy + 0.5) * ch;
+        const dx = cx - ptr.x, dy = cy - ptr.y;
+        const d = Math.hypot(dx, dy);
+        if (d > R) continue;
+        const w = 1 - (d / R) ** 2;
+        const i = gy * FW + gx;
+        if (combRate > 0) {
+          fx[i] += (dirx - fx[i]) * combRate * w;
+          fy[i] += (diry - fy[i]) * combRate * w;
+        }
+        if (part > 0 && d > 2) {
+          const ring = Math.min(1, d / (R * 0.45));
+          fx[i] += ((dx / d) * 0.8 * ring - fx[i]) * part * w;
+          fy[i] += ((dy / d) * 0.8 * ring - fy[i]) * part * w;
+        }
+        if (ptr.down) fz[i] = Math.max(fz[i], 0.85 * w);
+        const len = Math.hypot(fx[i], fy[i]);
+        if (len > 1) { fx[i] /= len; fy[i] /= len; }
+      }
+    }
+    if (speed > 40) lastStroke = now;
+    return speed;
+  }
+
+  function uploadField() {
+    for (let i = 0, j = 0; i < fx.length; i++, j += 4) {
+      fieldBytes[j] = Math.round((fx[i] * 0.5 + 0.5) * 255);
+      fieldBytes[j + 1] = Math.round((fy[i] * 0.5 + 0.5) * 255);
+      fieldBytes[j + 2] = Math.round(Math.min(1, fz[i]) * 255);
+      fieldBytes[j + 3] = 255;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, FW, FH, 0, gl.RGBA, gl.UNSIGNED_BYTE, fieldBytes);
+  }
+
+  // ---------------------------------------------------------------- sound
+  // all generated: filtered noise for brushing, a low sine for the thump
+  const sound = (() => {
+    let ac = null, brushGain = null, on = false;
+    function start() {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      const len = ac.sampleRate * 2;
+      const noise = ac.createBuffer(1, len, ac.sampleRate);
+      const data = noise.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      const src = ac.createBufferSource();
+      src.buffer = noise;
+      src.loop = true;
+      const band = ac.createBiquadFilter();
+      band.type = 'bandpass';
+      band.frequency.value = 2600;
+      band.Q.value = 0.7;
+      const soft = ac.createBiquadFilter();
+      soft.type = 'lowpass';
+      soft.frequency.value = 6000;
+      brushGain = ac.createGain();
+      brushGain.gain.value = 0;
+      src.connect(band).connect(soft).connect(brushGain).connect(ac.destination);
+      src.start();
+      sound.noise = noise;
+    }
+    const sound = {
+      noise: null,
+      toggle() {
+        on = !on;
+        if (on && !ac) start();
+        if (ac) on ? ac.resume() : ac.suspend();
+        return on;
+      },
+      brush(speed, over) {
+        if (!on || !brushGain) return;
+        const target = over ? Math.min(0.22, speed / 2400) : 0;
+        brushGain.gain.setTargetAtTime(target, ac.currentTime, 0.05);
+      },
+      thump() {
+        if (!on || !ac) return;
+        const t = ac.currentTime;
+        const o = ac.createOscillator();
+        const g = ac.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(120, t);
+        o.frequency.exponentialRampToValueAtTime(55, t + 0.14);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.35, t + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+        o.connect(g).connect(ac.destination);
+        o.start(t);
+        o.stop(t + 0.2);
+      },
+      fluff() {
+        if (!on || !ac || !sound.noise) return;
+        const t = ac.currentTime;
+        const s = ac.createBufferSource();
+        s.buffer = sound.noise;
+        const f = ac.createBiquadFilter();
+        f.type = 'lowpass';
+        f.frequency.setValueAtTime(5000, t);
+        f.frequency.exponentialRampToValueAtTime(400, t + 0.35);
+        const g = ac.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.16, t + 0.03);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
+        s.connect(f).connect(g).connect(ac.destination);
+        s.start(t);
+        s.stop(t + 0.42);
+      },
+    };
+    return sound;
+  })();
+
+  soundBtn.addEventListener('click', () => {
+    soundBtn.setAttribute('aria-pressed', String(sound.toggle()));
+  });
+
+  // ---------------------------------------------------------------- loop
+  let last = performance.now();
+  function frame(t) {
+    requestAnimationFrame(frame);
+    const dt = Math.min(0.05, Math.max(0.001, (t - last) / 1000));
+    last = t;
+    if (document.hidden) return;
+    now += dt;
+
+    // the pointer has stopped if no event arrived lately
+    if (performance.now() / 1000 - ptr.t > 0.06) { ptr.vx *= Math.exp(-dt / 0.05); ptr.vy *= Math.exp(-dt / 0.05); }
+
+    const speed = updateField(dt);
+    uploadField();
+    press += (pressTarget - press) * (1 - Math.exp(-dt / (pressTarget > press ? 0.06 : 0.12)));
+    // a damped spring after release: puff up, overshoot, settle
+    const since = now - released;
+    const poof = since < 1.2 ? Math.exp(-since / 0.28) * Math.cos(since * 17) : 0;
+
+    sound.brush(speed, ptr.inside);
+
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.uniform2f(U.uRes, canvas.width, canvas.height);
+    gl.uniform1f(U.uDpr, dpr);
+    gl.uniform2f(U.uC, btn.cx, btn.cy);
+    gl.uniform2f(U.uHalf, btn.hw, btn.hh);
+    gl.uniform1f(U.uLen, CONFIG.furLength);
+    gl.uniform1f(U.uCell, CONFIG.density);
+    gl.uniform1f(U.uTime, now);
+    gl.uniform1f(U.uPress, press);
+    gl.uniform1f(U.uPoof, reduced ? 0 : poof);
+    gl.uniform1f(U.uBreeze, reduced ? 0 : 1);
+    gl.uniform1i(U.uField, 0);
+    gl.uniform2f(U.uFieldMin, field.x, field.y);
+    gl.uniform2f(U.uFieldSize, field.w, field.h);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // status line
+    let msg = 'Stroke the fur', active = false;
+    if (ptr.down) { msg = 'Squish'; active = true; }
+    else if (now - released < 0.8) { msg = 'Fluffing up'; active = true; }
+    else if (ptr.inside && speed > 40) { msg = 'Stroking'; active = true; }
+    else if (ptr.inside) { msg = 'Parting the fur'; active = true; }
+    else if (now - lastStroke < 1.5) { msg = 'Settling'; }
+    if (statusText.textContent !== msg) statusText.textContent = msg;
+    statusEl.classList.toggle('active', active);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
