@@ -530,9 +530,41 @@ void main() {
   // ---------------------------------------------------------------- sound
   // all generated: filtered noise for brushing, a low sine for the thump
   const sound = (() => {
-    let ac = null, brushGain = null, on = false;
+    let ac = null, brushGain = null, on = false, keepAlive = null;
+    // iPhones (Safari, and Chrome — same engine) play Web Audio as "ambient"
+    // sound, muted by the silent switch. Ask for media playback instead: the
+    // Audio Session API where it exists, else a silent looping <audio>
+    // element started in the same tap, which switches the page to playback.
+    function playbackSession() {
+      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (_) {}
+      if (keepAlive || !/iP(hone|ad|od)|Macintosh/.test(navigator.userAgent) || !('ontouchend' in document)) return;
+      const rate = 8000, n = rate / 2, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+      const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+      str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt ');
+      v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+      v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true);
+      v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, n * 2, true);
+      keepAlive = new Audio(URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })));
+      keepAlive.loop = true;
+      keepAlive.setAttribute('playsinline', '');
+    }
+    // phones pause audio after a screen lock, call or tab switch: wake it on
+    // the next touch (must happen inside a gesture)
+    function wake() {
+      if (!on || !ac) return;
+      if (ac.state !== 'running') ac.resume().catch(() => {});
+      if (keepAlive && keepAlive.paused) keepAlive.play().catch(() => {});
+    }
+    addEventListener('pointerdown', wake, { capture: true, passive: true });
+    addEventListener('touchend', wake, { capture: true, passive: true });
     function start() {
-      ac = new (window.AudioContext || window.webkitAudioContext)();
+      playbackSession();
+      ac = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+      // older iOS only unlocks after something plays inside the tap
+      const blip = ac.createBufferSource();
+      blip.buffer = ac.createBuffer(1, 1, 22050);
+      blip.connect(ac.destination);
+      blip.start(0);
       const len = ac.sampleRate * 2;
       const noise = ac.createBuffer(1, len, ac.sampleRate);
       const data = noise.getChannelData(0);
@@ -558,7 +590,8 @@ void main() {
       toggle() {
         on = !on;
         if (on && !ac) start();
-        if (ac) on ? ac.resume() : ac.suspend();
+        if (ac) on ? ac.resume().catch(() => {}) : ac.suspend().catch(() => {});
+        if (keepAlive) on ? keepAlive.play().catch(() => {}) : keepAlive.pause();
         return on;
       },
       brush(speed, over) {
@@ -580,6 +613,24 @@ void main() {
         o.connect(g).connect(ac.destination);
         o.start(t);
         o.stop(t + 0.2);
+        // phone speakers can't reproduce the 55–120 Hz body above, so add a
+        // soft muffled "pff" in the mids that small speakers can play
+        if (sound.noise) {
+          const s = ac.createBufferSource();
+          s.buffer = sound.noise;
+          const f = ac.createBiquadFilter();
+          f.type = 'bandpass';
+          f.frequency.setValueAtTime(900, t);
+          f.frequency.exponentialRampToValueAtTime(350, t + 0.12);
+          f.Q.value = 1.2;
+          const m = ac.createGain();
+          m.gain.setValueAtTime(0.0001, t);
+          m.gain.exponentialRampToValueAtTime(0.22, t + 0.008);
+          m.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+          s.connect(f).connect(m).connect(ac.destination);
+          s.start(t, Math.random());
+          s.stop(t + 0.16);
+        }
       },
       fluff() {
         if (!on || !ac || !sound.noise) return;
