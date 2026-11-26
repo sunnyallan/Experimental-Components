@@ -697,7 +697,13 @@ void main() {
     return {
       press(type) { if (type === 'mouse') return; vib ? vib(12) : tick && tick(); },
       // two soft beats that follow the puff-up spring
-      release(type) { if (type === 'mouse') return; vib ? vib([7, 55, 5]) : tick && tick(); },
+      // iPhone can only tick on lift-off, so it gets the poof as a quick
+      // double tick instead (the second still inside the tap's activation)
+      release(type) {
+        if (type === 'mouse') return;
+        if (vib) vib([7, 55, 5]);
+        else if (tick) { tick(); setTimeout(tick, 70); }
+      },
       // a fine grain while a finger strokes the fur: faster pulses for faster strokes
       grain(speed, inside, t) {
         if (!vib || !inside || !touching || speed < 60 || t < nextGrain) return;
