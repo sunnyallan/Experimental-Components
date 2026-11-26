@@ -664,7 +664,16 @@ void main() {
   // <input type="checkbox" switch> plays the system haptic (iOS 18+) — it
   // only fires inside a tap, so iPhone gets press/release, not the grain.
   const haptics = (() => {
-    const vib = typeof navigator.vibrate === 'function' ? (p) => { try { navigator.vibrate(p); } catch (_) {} } : null;
+    // Chrome blocks vibration inside another site's iframe, so when embedded
+    // the pattern is passed up to the host page, which can vibrate for us
+    // (see the portfolio's ExperimentEmbed). Standalone, vibrate directly.
+    const framedElsewhere = (() => {
+      if (window.parent === window) return false;
+      try { void window.parent.location.href; return false; } catch (_) { return true; }
+    })();
+    const vib = typeof navigator.vibrate !== 'function' ? null
+      : framedElsewhere ? (p) => window.parent.postMessage({ source: 'experimental-components', type: 'haptic', pattern: p }, '*')
+      : (p) => { try { navigator.vibrate(p); } catch (_) {} };
     let tick = null;
     if (!vib && /iP(hone|ad|od)|Macintosh/.test(navigator.userAgent) && 'ontouchend' in document) {
       const label = document.createElement('label');
