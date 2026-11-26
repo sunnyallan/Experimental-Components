@@ -11,6 +11,8 @@
     like drawing on velvet, then slowly springs back.
   · Rest on it: the fur parts around the cursor.
   · Press: it dents under your finger. Release: it springs back and puffs up.
+  · The label is shaved into the fur: strands inside the letters are
+    clipped to stubble. Stroke across it to comb fur over the word.
   · Works with a finger on touch screens too.
   · HAPTICS on phones: a tap on press, a soft double "poof" on release and
     (Android) a fine grain under your finger while you stroke. iPhone has
@@ -85,6 +87,10 @@
     opacity: 0.82;
     text-shadow: 0 1px 0 rgba(255, 255, 255, 0.7), 0 0 14px rgba(255, 255, 255, 0.9);
     transition: transform 0.15s ease;
+    /* the word is shaved into the fur by the shader; this text stays for
+       screen readers and as the button's accessible name */
+    color: transparent;
+    text-shadow: none;
   }
 
   #asmr-button.pressed span { transform: translate(-50%, calc(-50% + 2px)); }
@@ -200,6 +206,8 @@ uniform vec3  uTip;        // tip tint
 uniform sampler2D uField;  // comb map: rg = lean direction, b = flattened
 uniform vec2  uFieldMin;   // comb map bounds, css px
 uniform vec2  uFieldSize;
+uniform sampler2D uLabel;  // the word, as a mask over the button (a = shaved)
+uniform float uShave;      // 0 until the font has loaded
 
 const int LAYERS = 40;
 
@@ -268,7 +276,10 @@ void main() {
     vec2 cell = floor(s / uCell);
     vec2 rnd = hash2(cell);
     vec2 root = (cell + 0.2 + 0.6 * rnd) * uCell;
+    // shaved: strands rooted inside the letters are clipped to stubble
+    float shaved = uShave * texture2D(uLabel, (root - (uC - uHalf)) / (uHalf * 2.0)).a;
     float len = (0.72 + 0.28 * rnd.x) * (1.0 - squash * 0.55) * (1.0 + 0.12 * uPoof);
+    len *= mix(1.0, 0.13 + 0.05 * rnd.y, shaved);
     if (h > len) continue;
     float k = h / len;
     float radius = uCell * 0.74 * pow(1.0 - k, 0.35) + 0.22;
@@ -295,6 +306,8 @@ void main() {
     vec3 N = normalize(vec3(gs * pow(1.0 - t, 1.5) * 1.7, 1.0));
     float dome = clamp(0.48 + 0.66 * dot(N, L), 0.42, 1.12);
     col *= dome * (1.0 - 0.4 * f.b);
+    // stubble sits down in the coat, in the shade of the fur around it
+    col *= mix(1.0, 0.7 + 0.08 * rnd.x, shaved);
     col += spec;
     gl_FragColor = vec4(col, 1.0);
     return;
@@ -323,6 +336,7 @@ void main() {
     furLength: 24,         // CSS px
     density: 2.3,          // strand spacing in CSS px (smaller = denser)
     recover: 1.8,          // seconds for combed fur to spring back
+    labelSize: 0.42,       // shaved word height, share of the button height
     brush: 40,             // stroke radius, CSS px
     maxDpr: 2,
   };
@@ -368,7 +382,7 @@ void main() {
 
   const U = {};
   for (const n of ['uRes', 'uDpr', 'uC', 'uHalf', 'uLen', 'uCell', 'uTime', 'uPress', 'uPoof',
-    'uBreeze', 'uBase', 'uTip', 'uField', 'uFieldMin', 'uFieldSize']) U[n] = gl.getUniformLocation(prog, n);
+    'uBreeze', 'uBase', 'uTip', 'uField', 'uFieldMin', 'uFieldSize', 'uLabel', 'uShave']) U[n] = gl.getUniformLocation(prog, n);
 
   const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
   const lin = (c) => c;
@@ -389,6 +403,45 @@ void main() {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  // ---------------------------------------------------------------- shaved label
+  // the button's text, drawn bold into a mask the shader trims the fur with
+  const labelCanvas = document.createElement('canvas');
+  const labelTex = gl.createTexture();
+  let labelReady = false;
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, labelTex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.activeTexture(gl.TEXTURE0);
+
+  function drawLabel() {
+    const w = Math.max(2, Math.round(btn.hw * 2)), h = Math.max(2, Math.round(btn.hh * 2));
+    labelCanvas.width = w; labelCanvas.height = h;
+    const c = labelCanvas.getContext('2d');
+    const text = (button.textContent || '').trim().toUpperCase();
+    const size = h * CONFIG.labelSize;
+    c.font = `800 ${size}px Inter, system-ui, sans-serif`;
+    const gap = size * 0.12;
+    const widths = [...text].map((ch) => c.measureText(ch).width);
+    let x = (w - (widths.reduce((a, b) => a + b, 0) + gap * (text.length - 1))) / 2;
+    c.textBaseline = 'middle';
+    c.fillStyle = c.strokeStyle = '#fff';
+    // fatten the letters a touch so the surrounding fur can't swallow them
+    c.lineWidth = size * 0.04;
+    c.lineJoin = 'round';
+    [...text].forEach((ch, i) => {
+      c.fillText(ch, x, h / 2 + size * 0.04);
+      c.strokeText(ch, x, h / 2 + size * 0.04);
+      x += widths[i] + gap;
+    });
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, labelTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, labelCanvas);
+    gl.activeTexture(gl.TEXTURE0);
+  }
 
   // ---------------------------------------------------------------- layout
   let dpr = 1, cssW = 0, cssH = 0;
@@ -415,8 +468,11 @@ void main() {
       width: w + 'px', height: h + 'px', fontSize: Math.max(14, h * 0.17) + 'px',
     });
   }
-  addEventListener('resize', resize);
+  addEventListener('resize', () => { resize(); if (labelReady) drawLabel(); });
   resize();
+  // wait for Inter so the shaved word uses the right letterforms
+  (document.fonts ? document.fonts.load('800 40px Inter').catch(() => {}) : Promise.resolve())
+    .then(() => { drawLabel(); labelReady = true; });
 
   const sdPill = (x, y) => {
     const r = btn.hh;
@@ -755,6 +811,8 @@ void main() {
     gl.uniform1i(U.uField, 0);
     gl.uniform2f(U.uFieldMin, field.x, field.y);
     gl.uniform2f(U.uFieldSize, field.w, field.h);
+    gl.uniform1i(U.uLabel, 1);
+    gl.uniform1f(U.uShave, labelReady ? 1 : 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     // status line
