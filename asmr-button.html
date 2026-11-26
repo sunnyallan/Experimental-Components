@@ -12,6 +12,10 @@
   · Rest on it: the fur parts around the cursor.
   · Press: it dents under your finger. Release: it springs back and puffs up.
   · Works with a finger on touch screens too.
+  · HAPTICS on phones: a tap on press, a soft double "poof" on release and
+    (Android) a fine grain under your finger while you stroke. iPhone has
+    no vibration API for websites, so it gets a system tick on press and
+    release (iOS 18+) — via a hidden switch control, the only route in.
   · SOUND (top right, off by default): a soft brushing hiss that follows
     your stroke, a muffled thump on press, an airy fluff on release — all
     generated in code, no audio files.
@@ -447,14 +451,16 @@ void main() {
     button.classList.add('pressed');
     try { button.setPointerCapture(e.pointerId); } catch (_) { /* release still fires */ }
     sound.thump();
+    haptics.press(e.pointerType);
   });
-  const release = () => {
+  const release = (e) => {
     if (!ptr.down) return;
     ptr.down = false;
     pressTarget = 0;
     released = now;
     button.classList.remove('pressed');
     sound.fluff();
+    haptics.release(e && e.pointerType);
   };
   button.addEventListener('pointerup', release);
   button.addEventListener('pointercancel', release);
@@ -653,6 +659,46 @@ void main() {
     return sound;
   })();
 
+  // ---------------------------------------------------------------- haptics
+  // Android: the Vibration API. iPhone: no API, but toggling a native
+  // <input type="checkbox" switch> plays the system haptic (iOS 18+) — it
+  // only fires inside a tap, so iPhone gets press/release, not the grain.
+  const haptics = (() => {
+    const vib = typeof navigator.vibrate === 'function' ? (p) => { try { navigator.vibrate(p); } catch (_) {} } : null;
+    let tick = null;
+    if (!vib && /iP(hone|ad|od)|Macintosh/.test(navigator.userAgent) && 'ontouchend' in document) {
+      const label = document.createElement('label');
+      label.setAttribute('aria-hidden', 'true');
+      label.style.display = 'none';
+      const sw = document.createElement('input');
+      sw.type = 'checkbox';
+      sw.setAttribute('switch', '');
+      sw.tabIndex = -1;
+      label.appendChild(sw);
+      document.body.appendChild(label);
+      tick = () => label.click();
+    }
+    let nextGrain = 0, touching = false;
+    // grain only while a finger is on the glass — a pulse after lift-off
+    // would cut short the release "poof" (a new vibration replaces the last)
+    addEventListener('pointerdown', (e) => { touching = e.pointerType !== 'mouse'; }, { capture: true, passive: true });
+    const lift = () => { touching = false; };
+    addEventListener('pointerup', lift, { capture: true, passive: true });
+    addEventListener('pointercancel', lift, { capture: true, passive: true });
+    return {
+      press(type) { if (type === 'mouse') return; vib ? vib(12) : tick && tick(); },
+      // two soft beats that follow the puff-up spring
+      release(type) { if (type === 'mouse') return; vib ? vib([7, 55, 5]) : tick && tick(); },
+      // a fine grain while a finger strokes the fur: faster pulses for faster strokes
+      grain(speed, inside, t) {
+        if (!vib || !inside || !touching || speed < 60 || t < nextGrain) return;
+        const k = Math.min(1, speed / 1600);
+        vib(k > 0.6 ? 6 : 4);
+        nextGrain = t + 0.14 - 0.09 * k;
+      },
+    };
+  })();
+
   soundBtn.addEventListener('click', () => {
     soundBtn.setAttribute('aria-pressed', String(sound.toggle()));
   });
@@ -677,6 +723,7 @@ void main() {
     const poof = since < 1.2 ? Math.exp(-since / 0.28) * Math.cos(since * 17) : 0;
 
     sound.brush(speed, ptr.inside);
+    haptics.grain(speed, ptr.inside, now);
 
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
